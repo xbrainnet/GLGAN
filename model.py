@@ -184,3 +184,30 @@ class GLGAT(nn.Module):
         x = x.view(-1, 90, 90)
         x = x[:].sum(dim=0)
         return x
+
+    def projection1(self, z):
+        z = F.elu(self.fc1(z))
+        return self.fc2(z)
+    
+    def sim(self, z1, z2):
+        z1 = F.normalize(z1)
+        z2 = F.normalize(z2)
+        return torch.mm(z1, z2.t())
+
+    def semi_loss(self, z1, z2):
+        tau = 0.4
+        def f(x): return torch.exp(x / tau)
+        refl_sim = f(self.sim(z1, z1))
+        between_sim = f(self.sim(z1, z2))
+        return torch.log(between_sim.diag() / (refl_sim.sum(1) + between_sim.sum(1) - refl_sim.diag()))
+
+    def contrast_loss1(self, z1, z2):  # 窗口内增广后的对比损失
+        h1 = self.projection1(z1)
+        h2 = self.projection1(z2)
+
+        l1 = self.semi_loss(h1, h2)
+        l2 = self.semi_loss(h2, h1)
+
+        ret = (l1 + l2) * 0.5
+        ret = ret.mean()
+        return ret
