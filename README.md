@@ -1,7 +1,6 @@
 Python 3.9
 
-
-Pytorch 1.13.1+cu116
+Pytorch 1.13.1 + cu116
 
 networks 2.8.4
 
