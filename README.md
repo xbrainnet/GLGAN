@@ -7,7 +7,7 @@ Official codes for paper "Collaborative Graph Convolutional Networks for Cross-M
 ## Overview
 ![1751189091019](image/README/1751189091019.png)
 
-This project implements a **Global-Local Graph Attention Network (GLGATN)** framework for brain network analysis, specifically designed for brain disorder classification tasks. The method integrates functional connectivity from fMRI and structural connectivity from DTI data, leveraging attention mechanisms and contrastive learning to enhance classification performance.
+This project implements a **Global-Local Graph Attention Network (GLGAN)** framework for brain network analysis, specifically designed for brain disorder classification tasks. The method integrates functional connectivity from fMRI and structural connectivity from DTI data, leveraging attention mechanisms and contrastive learning to enhance classification performance.
 
 ## Recommended System Configurations
 - Python >= 3.8
