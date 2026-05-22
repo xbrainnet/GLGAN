@@ -1,209 +1,165 @@
-import torch
-import torch.nn as nn
-import torch.optim as optim
+from dataclasses import dataclass
+from pathlib import Path
+import csv
+
 import numpy as np
-from sklearn.metrics import accuracy_score, precision_recall_fscore_support, roc_auc_score
-from models.glgat import GLGAT
+import torch
+from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, precision_score, recall_score, roc_auc_score
+from sklearn.model_selection import StratifiedKFold
+from torch import nn
+from torch.utils.data import DataLoader, Subset
+
 from config.config import Config
-from utils.logger import Logger
+from data.data_loader import BrainConnectivityDataset
+from models.model import GLGAN
+from utils.seed import set_seed
 
-class ContrastiveLoss(nn.Module):
-    """对比损失函数"""
-    
-    def __init__(self, temperature=Config.TAU):
-        super(ContrastiveLoss, self).__init__()
-        self.temperature = temperature
-    
-    def forward(self, features, labels):
-        """
-        计算对比损失
-        
-        Args:
-            features: 归一化特征 [batch_size, feature_dim]
-            labels: 标签 [batch_size]
-        """
-        batch_size = features.size(0)
-        
-        # 计算相似度矩阵
-        similarity_matrix = torch.matmul(features, features.T) / self.temperature
-        
-        # 创建标签掩码
-        labels = labels.contiguous().view(-1, 1)
-        mask = torch.eq(labels, labels.T).float()
-        
-        # 移除对角线
-        mask = mask - torch.eye(batch_size, device=mask.device)
-        
-        # 计算损失
-        exp_sim = torch.exp(similarity_matrix)
-        sum_exp_sim = exp_sim.sum(dim=1, keepdim=True)
-        
-        log_prob = similarity_matrix - torch.log(sum_exp_sim)
-        mean_log_prob_pos = (mask * log_prob).sum(dim=1) / (mask.sum(dim=1) + 1e-8)
-        
-        loss = -mean_log_prob_pos.mean()
-        return loss
 
-class GLGATTrainer:
-    """GLGAT训练器"""
-    
-    def __init__(self, device=None, logger=None):
-        self.device = device or Config.DEVICE
-        self.logger = logger or Logger()
-        
-        # 初始化模型
-        self.model = GLGAT().to(self.device)
-        
-        # 损失函数
-        self.classification_loss = nn.CrossEntropyLoss()
-        self.contrastive_loss = ContrastiveLoss()
-        
-        # 优化器
-        self.optimizer = optim.Adam(
-            self.model.parameters(), 
-            lr=Config.LEARNING_RATE
+@dataclass(frozen=True)
+class CrossValidationResult:
+    fold_metrics: list[dict[str, float]]
+    aggregate_metrics: dict[str, float]
+
+
+def run_cross_validation(
+    fmri: np.ndarray,
+    dti: np.ndarray,
+    labels: np.ndarray,
+    config: Config,
+) -> CrossValidationResult:
+    set_seed(config.random_seed)
+    output_dir = Path(config.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if config.save_checkpoints:
+        (output_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
+
+    labels = labels.astype("int64")
+    splitter = StratifiedKFold(n_splits=config.k_folds, shuffle=True, random_state=config.random_seed)
+    fold_metrics: list[dict[str, float]] = []
+
+    for fold, (train_index, test_index) in enumerate(splitter.split(fmri, labels), start=1):
+        dataset = BrainConnectivityDataset(fmri, dti, labels)
+        train_loader = DataLoader(Subset(dataset, train_index), batch_size=config.batch_size, shuffle=True)
+        test_loader = DataLoader(Subset(dataset, test_index), batch_size=config.batch_size, shuffle=False)
+
+        model = GLGAN(config).to(config.torch_device)
+        optimizer = torch.optim.Adam(
+            model.parameters(),
+            lr=config.learning_rate,
+            weight_decay=config.weight_decay,
         )
-        
-        # 早停
-        self.best_val_acc = 0.0
-        self.patience_counter = 0
-        
-    def train_epoch(self, train_loader):
-        """训练一个epoch"""
-        self.model.train()
-        total_loss = 0.0
-        predictions = []
-        true_labels = []
-        
-        for batch in train_loader:
-            fmri_data = batch['fmri'].to(self.device)
-            dti_data = batch['dti'].to(self.device)
-            labels = batch['label'].squeeze().to(self.device)
-            
-            self.optimizer.zero_grad()
-            
-            # 前向传播
-            logits, contrastive_features = self.model(fmri_data, dti_data)
-            
-            # 计算损失
-            cls_loss = self.classification_loss(logits, labels)
-            cont_loss = self.contrastive_loss(contrastive_features, labels)
-            total_loss_batch = cls_loss + Config.BETA * cont_loss
-            
-            # 反向传播
-            total_loss_batch.backward()
-            self.optimizer.step()
-            
-            total_loss += total_loss_batch.item()
-            
-            # 记录预测结果
-            pred = torch.argmax(logits, dim=1)
-            predictions.extend(pred.cpu().numpy())
-            true_labels.extend(labels.cpu().numpy())
-        
-        # 计算指标
-        accuracy = accuracy_score(true_labels, predictions)
-        
-        return total_loss / len(train_loader), accuracy
-    
-    def validate(self, val_loader):
-        """验证模型"""
-        self.model.eval()
-        total_loss = 0.0
-        predictions = []
-        true_labels = []
-        probabilities = []
-        
-        with torch.no_grad():
-            for batch in val_loader:
-                fmri_data = batch['fmri'].to(self.device)
-                dti_data = batch['dti'].to(self.device)
-                labels = batch['label'].squeeze().to(self.device)
-                
-                # 前向传播
-                logits, contrastive_features = self.model(fmri_data, dti_data)
-                
-                # 计算损失
-                cls_loss = self.classification_loss(logits, labels)
-                cont_loss = self.contrastive_loss(contrastive_features, labels)
-                total_loss_batch = cls_loss + Config.BETA * cont_loss
-                
-                total_loss += total_loss_batch.item()
-                
-                # 记录结果
-                pred = torch.argmax(logits, dim=1)
-                prob = torch.softmax(logits, dim=1)
-                
-                predictions.extend(pred.cpu().numpy())
-                true_labels.extend(labels.cpu().numpy())
-                probabilities.extend(prob.cpu().numpy())
-        
-        # 计算指标
-        accuracy = accuracy_score(true_labels, predictions)
-        precision, recall, f1, _ = precision_recall_fscore_support(
-            true_labels, predictions, average='weighted'
-        )
-        
-        # AUC (如果是二分类)
-        if len(np.unique(true_labels)) == 2:
-            auc = roc_auc_score(true_labels, np.array(probabilities)[:, 1])
-        else:
-            auc = 0.0
-        
-        metrics = {
-            'loss': total_loss / len(val_loader),
-            'accuracy': accuracy,
-            'precision': precision,
-            'recall': recall,
-            'f1': f1,
-            'auc': auc
-        }
-        
-        return metrics
-    
-    def train(self, train_loader, val_loader, epochs=Config.EPOCHS):
-        """完整训练过程"""
-        self.logger.info("开始训练...")
-        
-        for epoch in range(epochs):
-            # 训练
-            train_loss, train_acc = self.train_epoch(train_loader)
-            
-            # 验证
-            val_metrics = self.validate(val_loader)
-            
-            # 日志记录
-            self.logger.info(
-                f"Epoch {epoch+1}/{epochs} - "
-                f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f} - "
-                f"Val Loss: {val_metrics['loss']:.4f}, Val Acc: {val_metrics['accuracy']:.4f}"
-            )
-            
-            # 早停检查
-            if val_metrics['accuracy'] > self.best_val_acc:
-                self.best_val_acc = val_metrics['accuracy']
-                self.patience_counter = 0
-                self.save_model('best_model.pth')
-            else:
-                self.patience_counter += 1
-                
-            if self.patience_counter >= Config.PATIENCE:
-                self.logger.info(f"Early stopping at epoch {epoch+1}")
-                break
-        
-        return self.best_val_acc
-    
-    def save_model(self, filename):
-        """保存模型"""
-        torch.save({
-            'model_state_dict': self.model.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            'best_val_acc': self.best_val_acc
-        }, Config.MODEL_SAVE_PATH + filename)
-    
-    def load_model(self, filename):
-        """加载模型"""
-        checkpoint = torch.load(Config.MODEL_SAVE_PATH + filename)
-        self.model.load_state_dict(checkpoint['model_state_dict'])
-        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        self.best_val_acc = checkpoint['best_val_acc']
+        criterion = nn.CrossEntropyLoss()
+
+        best_metrics: dict[str, float] | None = None
+        best_accuracy = -1.0
+        for _ in range(config.epochs):
+            _train_one_epoch(model, train_loader, criterion, optimizer, config)
+            metrics = evaluate(model, test_loader, criterion, config)
+            if metrics["accuracy"] > best_accuracy:
+                best_accuracy = metrics["accuracy"]
+                best_metrics = metrics
+                if config.save_checkpoints:
+                    torch.save(model.state_dict(), output_dir / "checkpoints" / f"fold_{fold}_best.pt")
+
+        assert best_metrics is not None
+        best_metrics = {"fold": float(fold), **best_metrics}
+        fold_metrics.append(best_metrics)
+
+    aggregate_metrics = _aggregate_metrics(fold_metrics)
+    _write_metrics_csv(output_dir / "fold_metrics.csv", fold_metrics)
+    _write_aggregate_csv(output_dir / "aggregate_metrics.csv", aggregate_metrics)
+    return CrossValidationResult(fold_metrics=fold_metrics, aggregate_metrics=aggregate_metrics)
+
+
+def evaluate(model: GLGAN, loader: DataLoader, criterion: nn.Module, config: Config) -> dict[str, float]:
+    model.eval()
+    losses: list[float] = []
+    predictions: list[int] = []
+    probabilities: list[float] = []
+    targets: list[int] = []
+
+    with torch.no_grad():
+        for fmri, dti, labels in loader:
+            fmri = fmri.to(config.torch_device)
+            dti = dti.to(config.torch_device)
+            labels = labels.to(config.torch_device)
+            logits, _ = model(fmri, dti)
+            loss = criterion(logits, labels)
+            probs = torch.softmax(logits, dim=1)
+            losses.append(float(loss.detach().cpu()))
+            predictions.extend(torch.argmax(probs, dim=1).cpu().numpy().tolist())
+            probabilities.extend(probs[:, 1].cpu().numpy().tolist())
+            targets.extend(labels.cpu().numpy().tolist())
+
+    return _classification_metrics(targets, predictions, probabilities, float(np.mean(losses)))
+
+
+def _train_one_epoch(
+    model: GLGAN,
+    loader: DataLoader,
+    criterion: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    config: Config,
+) -> None:
+    model.train()
+    for fmri, dti, labels in loader:
+        fmri = fmri.to(config.torch_device)
+        dti = dti.to(config.torch_device)
+        labels = labels.to(config.torch_device)
+        optimizer.zero_grad()
+        logits, _ = model(fmri, dti)
+        loss = criterion(logits, labels)
+        loss.backward()
+        optimizer.step()
+
+
+def _classification_metrics(
+    targets: list[int], predictions: list[int], probabilities: list[float], loss: float
+) -> dict[str, float]:
+    labels = np.asarray(targets)
+    preds = np.asarray(predictions)
+    probs = np.asarray(probabilities)
+    tn, fp, fn, tp = confusion_matrix(labels, preds, labels=[0, 1]).ravel()
+    sensitivity = tp / (tp + fn) if tp + fn else 0.0
+    specificity = tn / (tn + fp) if tn + fp else 0.0
+    try:
+        auc = roc_auc_score(labels, probs)
+    except ValueError:
+        auc = 0.0
+    return {
+        "loss": loss,
+        "accuracy": accuracy_score(labels, preds),
+        "precision": precision_score(labels, preds, zero_division=0),
+        "recall": recall_score(labels, preds, zero_division=0),
+        "specificity": specificity,
+        "sensitivity": sensitivity,
+        "f1": f1_score(labels, preds, zero_division=0),
+        "auc": auc,
+    }
+
+
+def _aggregate_metrics(fold_metrics: list[dict[str, float]]) -> dict[str, float]:
+    aggregate_metrics: dict[str, float] = {}
+    metric_names = [name for name in fold_metrics[0] if name != "fold"]
+    for name in metric_names:
+        values = np.asarray([row[name] for row in fold_metrics], dtype=float)
+        aggregate_metrics[f"{name}_mean"] = float(values.mean())
+        aggregate_metrics[f"{name}_std"] = float(values.std())
+    return aggregate_metrics
+
+
+def _write_metrics_csv(path: Path, rows: list[dict[str, float]]) -> None:
+    if not rows:
+        return
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _write_aggregate_csv(path: Path, aggregate_metrics: dict[str, float]) -> None:
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["metric", "value"])
+        for key, value in aggregate_metrics.items():
+            writer.writerow([key, value])
