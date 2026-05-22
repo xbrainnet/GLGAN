@@ -1,81 +1,72 @@
-config_code = '''
+from dataclasses import dataclass, replace
+from pathlib import Path
+from typing import Optional, Sequence
+
 import torch
 
-class Config:
-    """全局配置类"""
-    
-    # 设备配置
-    DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    
-    # 数据配置
-    DATA_PATH = './data/raw/'
-    FMRI_FILE = 'ADNI_fmri.mat'
-    DTI_FILE = 'ADNI_dti.mat'
-    
-    # 数据预处理
-    N_SUBJECTS = 217  # 总样本数
-    N_REGIONS = 90    # 脑区数量
-    
-    # 模型配置
-    N_CLASS = 2
-    N_FEAT = 90       # 输入特征维度
-    N_HID = 90        # 隐藏层维度
-    DROPOUT = 0.5
-    ALPHA = 0.2       # LeakyReLU负斜率
-    BETA = 1e7        # 对比损失权重
-    
-    # 训练配置
-    BATCH_SIZE_TRAIN = 20
-    BATCH_SIZE_TEST = 13
-    LEARNING_RATE = 2e-5
-    EPOCHS = 300
-    PATIENCE = 60     # 早停耐心值
-    
-    # 交叉验证配置
-    K_FOLDS = 10
-    RANDOM_SEED = 7
-    
-    # 注意力机制配置
-    EMBED_DIM = 8100  # 嵌入维度
-    NUM_HEADS = 8100  # 注意力头数
-    HIDDEN_SIZE = 90  # 注意力隐藏层大小
-    
-    # 对比学习配置
-    TAU = 0.4         # 温度参数
-    PROJECTION_DIM1 = 2048
-    PROJECTION_DIM2 = 256
-    
-    # PageRank配置
-    PAGERANK_ALPHA = 0.85
-    
-    # 分类器配置
-    CLASSIFIER_DIMS = [8100, 1024, 128, 2]
-    
-    # 日志配置
-    LOG_FILE = './results/logs/training.log'
-    MODEL_SAVE_PATH = './results/models/'
-    
-    @classmethod
-    def get_device_info(cls):
-        """获取设备信息"""
-        if torch.cuda.is_available():
-            return f"CUDA Device: {torch.cuda.get_device_name(0)}"
-        else:
-            return "CPU Device"
-    
-    @classmethod
-    def print_config(cls):
-        """打印配置信息"""
-        print("=" * 50)
-        print("Configuration Settings:")
-        print("=" * 50)
-        for attr in dir(cls):
-            if not attr.startswith('_') and not callable(getattr(cls, attr)):
-                print(f"{attr}: {getattr(cls, attr)}")
-        print("=" * 50)
-'''
 
-with open('/home/user/config/config.py', 'w') as f:
-    f.write(config_code)
-    
-print("config/config.py 创建完成")
+@dataclass(frozen=True)
+class Config:
+    """Experiment configuration aligned with the revised manuscript."""
+
+    # Data
+    data_dir: str = "data/raw"
+    fmri_file: str = "ADNI_fmri.mat"
+    dti_file: str = "ADNI_DTI.mat"
+    fmri_key: Optional[str] = None
+    dti_key: Optional[str] = None
+    label_key: Optional[str] = None
+    n_regions: int = 90
+    n_classes: int = 2
+    class_values: Optional[Sequence[int]] = None
+
+    # Model
+    hidden_dim: int = 90
+    dropout: float = 0.5
+    alpha: float = 0.2
+    pagerank_alpha: float = 0.85
+    pagerank_iters: int = 50
+    classifier_hidden_1: int = 1024
+    classifier_hidden_2: int = 128
+    use_local_branch: bool = True
+    use_global_branch: bool = True
+    use_pagerank: bool = True
+    use_self_attention: bool = True
+
+    # Training
+    batch_size: int = 20
+    epochs: int = 300
+    learning_rate: float = 5e-5
+    weight_decay: float = 5e-6
+    k_folds: int = 10
+    random_seed: int = 7
+
+    # Output
+    output_dir: str = "results"
+    save_checkpoints: bool = True
+    device: str = "cuda:0" if torch.cuda.is_available() else "cpu"
+
+    def with_updates(self, **kwargs: object) -> "Config":
+        return replace(self, **kwargs)
+
+    @property
+    def data_path(self) -> Path:
+        return Path(self.data_dir)
+
+    @property
+    def output_path(self) -> Path:
+        return Path(self.output_dir)
+
+    @property
+    def torch_device(self) -> torch.device:
+        return torch.device(self.device if torch.cuda.is_available() or self.device == "cpu" else "cpu")
+
+    @property
+    def flattened_feature_dim(self) -> int:
+        enabled_branches = int(self.use_local_branch) + int(self.use_global_branch)
+        if enabled_branches == 0:
+            raise ValueError("At least one of use_local_branch or use_global_branch must be enabled.")
+        return self.n_regions * self.hidden_dim * enabled_branches
+
+
+DEFAULT_CONFIG = Config()
