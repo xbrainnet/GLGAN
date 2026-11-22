@@ -1,56 +1,129 @@
-# Collaborative Graph Convolutional Networks for Cross-Modal Brain Network Analysis
-[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)     [![PyTorch](https://img.shields.io/badge/PyTorch-1.13+-red.svg)](https://pytorch.org/)
+# GLGAN: Global-Local Graph Attention Network
 
-Official codes for paper "Collaborative Graph Convolutional Networks for Cross-Modal Brain Network Analysis"
+This repository contains the PyTorch implementation used for the revised manuscript. The code is organized to reproduce the main cross-validation experiments with fMRI functional connectivity and DTI structural connectivity matrices.
 
+## Implementation
 
-## Overview
-![1751189091019](image/README/1751189091019.png)
+The proposed model is implemented in PyTorch. The default configuration follows the revised manuscript:
 
-This project implements a **Global-Local Graph Attention Network (GLGAN)** framework for brain network analysis, specifically designed for brain disorder classification tasks. The method integrates functional connectivity from fMRI and structural connectivity from DTI data, leveraging attention mechanisms and contrastive learning to enhance classification performance.
+- Optimizer: Adam
+- Initial learning rate: `5e-5`
+- Weight decay: `5e-6`
+- Epochs: `300`
+- Batch size: `20`
+- Cross-validation: 10 folds with random seed `7`
+- Local branch: single-layer graph attention network integrated with self-attention
+- Global branch: PageRank-based graph attention integrated with self-attention
+- Classifier: flattened global-local features followed by a multi-layer perceptron
 
-## Recommended System Configurations
-- Python >= 3.8
-- Pytorch 1.13.1 + cu116
-- GPU with at least 12GB memory
-- networks 2.8.4
-- numpy 1.24.2
-- scipy 1.10.1
-- scikit-learn 1.2.1
+## Repository Layout
 
-## Datasets
-- [ADNI](https://adni.loni.usc.edu/ "Alzheimer's Disease Neuroimaging Initiative")
+```text
+config/                 Experiment configuration
+data/                   Data loader and data-format documentation
+models/                 GLGAN model implementation
+training/               Cross-validation training and metrics
+utils/                  Logging and reproducibility helpers
+experiments/            Reproduction commands for main and ablation experiments
+analysis/               ROC, t-SNE, parameter-count, hubness, sensitivity, and ROI analysis scripts
+tests/                  Basic checks for data loading, model forward pass, and training
+main.py                 Command-line entry point
+```
 
+## Environment
+
+```bash
+conda create -n glgan python=3.8
+conda activate glgan
+pip install -r requirements.txt
+```
+
+The experiments in the manuscript were run on an NVIDIA GeForce RTX 3080 12GB GPU. CPU execution is supported for installation checks but is not recommended for full 300-epoch cross-validation.
 
 ## Data Preparation
 
-#### Required Data Files
-1. Place fMRI data file `ADNI_fmri.mat` in `data/raw/` directory
-2. Place DTI data file `ADNI_dti.mat` in `data/raw/` directory
+ADNI data are governed by the ADNI data-use agreement and are not redistributed in this repository. After obtaining access from ADNI, place the processed `.mat` files under:
 
-#### Data Format Requirements
-- **fMRI Data**: Functional connectivity matrices with shape [n_subjects, n_regions, n_regions]
-- **DTI Data**: Structural connectivity matrices with shape [n_subjects, n_regions, n_regions]  
-- **Labels**: Binary labels (0 for Normal Control, 1 for Patient)
-
-#### Data Structure
-```
-data/
-├── raw/
-│   ├── ADNI_fmri.mat    # fMRI functional connectivity
-│   └── ADNI_dti.mat        # DTI structural connectivity
-└── processed/            # Preprocessed data (auto-generated)
+```text
+data/raw/
+|-- ADNI_fmri.mat
+`-- ADNI_DTI.mat
 ```
 
-## Dataset Pre-processing
-Pre-process the fMRI and DTI as mentioned in the section IV. Experiments-A. Materials.
+Expected arrays:
 
-## Project Structure and Usage
+- fMRI connectivity: `[n_subjects, 90, 90]`, or regional time series `[n_subjects, 90, time_points]` from which the loader computes Pearson connectivity.
+- DTI connectivity: `[n_subjects, 90, 90]`.
+- Labels: a vector stored in the fMRI `.mat` file. Use `--label-key` if the key is not one of `label`, `labels`, `y`, `Y`, `gnd`, or `target`.
 
-This project is organized into several modules: `config/` contains configuration files for model parameters, `data/` handles data loading and preprocessing with the main data loader in `data_loader.py`, `models/` contains the GLGAT model implementation in `glgat.py`, `training/` includes the training pipeline in `trainer.py`, `utils/` provides logging and seed management utilities, and `results/` stores training outputs and model checkpoints.
+See `data/README.md` for details.
 
-To use this code, first place your fMRI data file `ADNI_fmri.mat` and DTI data file `ADNI_dti.mat` in the `data/raw/` directory, then simply run `python main.py` to start training - the system will automatically load the data, initialize the GLGAT model, perform training with the configured parameters, and save results in the `results/` directory. You can modify training parameters like learning rate, batch size, and number of epochs in `config/config.py` before running.
+## Run the Main Experiment
+
+With the default file names:
+
+```bash
+python main.py
+```
+
+If your `.mat` variable names differ:
+
+```bash
+python main.py --fmri-key fmri --dti-key dti --label-key label
+```
+
+To select a binary task from multi-class labels:
+
+```bash
+python main.py --class-values 0 1 --output-dir results/NC_SMC
+```
+
+Results are written to:
+
+```text
+results/
+|-- fold_metrics.csv
+|-- aggregate_metrics.csv
+|-- training.log
+`-- checkpoints/
+```
+
+## Ablation Experiments
+
+The code exposes the main ablation switches used to reproduce component-removal experiments:
+
+```bash
+python main.py --disable-local --output-dir results/ablation_no_local
+python main.py --disable-global --output-dir results/ablation_no_global
+python main.py --disable-pagerank --output-dir results/ablation_no_pagerank
+python main.py --disable-self-attention --output-dir results/ablation_no_self_attention
+```
+
+Additional notes are in `experiments/README.md`.
+
+## Additional Analyses
+
+Post-processing scripts for common manuscript analyses are provided under `analysis/`. They operate on outputs generated by the GLGAN training workflow.
+
+```bash
+python -m analysis.parameter_count --output results/analysis/parameter_count.csv
+python -m analysis.roc_analysis --input predictions.csv --output results/analysis/roc_points.csv
+python -m analysis.tsne_analysis --features features.npy --labels labels.npy --output results/analysis/tsne_coordinates.csv
+python -m analysis.hubness_analysis --adjacency adjacency.npy --output results/analysis/hubness.csv
+python -m analysis.roi_ranking --input results/analysis/hubness.csv --output results/analysis/top_rois.csv
+python -m analysis.sensitivity_statistics --input sensitivity_results.csv --parameter-column learning_rate --metric-column accuracy
+```
+
+The ROC script expects a CSV with `label` and `score` columns. The t-SNE script expects a NumPy feature matrix shaped `[n_samples, n_features]`.
+
+## Installation Check
+
+To confirm that the repository is installed correctly:
+
+```bash
+python -m unittest discover -s tests -v
+```
 
 ## Citation
-If you use this code, please cite the corresponding paper: (unavailable now)
 
+Please cite the corresponding manuscript if you use this code.
